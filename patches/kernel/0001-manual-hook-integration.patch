@@ -1,0 +1,351 @@
+diff --git a/arch/arm64/configs/grass-perf_defconfig b/arch/arm64/configs/grass-perf_defconfig
+index 3a7b2c917..25a919265 100644
+--- a/arch/arm64/configs/grass-perf_defconfig
++++ b/arch/arm64/configs/grass-perf_defconfig
+@@ -714,3 +714,9 @@ CONFIG_DEBUG_LIST=y
+ CONFIG_IPC_LOGGING=y
+ CONFIG_RMNET_PERF=y
+ CONFIG_RMNET_SHS=y
++
++CONFIG_KSU=y
++CONFIG_KSU_MANUAL_HOOK=y
++# CONFIG_KSU_SYSCALL_TABLE_HOOK is not set
++# CONFIG_KSU_KPROBES_HOOK is not set
++# CONFIG_KPROBES is not set
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index 8bfbff752..489e50d85 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -250,4 +250,5 @@ source "drivers/watchdogtest/Kconfig"
+ source "drivers/backlight/Kconfig"
+ 
+ source "drivers/gud/Kconfig"
++source "drivers/kernelsu/Kconfig"
+ endmenu
+diff --git a/drivers/Makefile b/drivers/Makefile
+index 80c06caf4..794e41080 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -203,3 +203,4 @@ obj-$(CONFIG_WATCHDOG_CPU_CTX)	+= watchdog_cpu_ctx/
+ obj-$(CONFIG_WATCHDOGTEST)	+= watchdogtest/
+ obj-y				+= backlight/
+ obj-y				+= gud/
++obj-$(CONFIG_KSU) += kernelsu/
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+index 70ffffea3..3ecaa4f93 100644
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -444,11 +444,22 @@ static void input_handle_event(struct input_dev *dev,
+  * to 'seed' initial state of a switch or initial position of absolute
+  * axis, etc.
+  */
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++extern bool ksu_input_hook __read_mostly;
++extern int ksu_handle_input_handle_event(unsigned int *type,
++					 unsigned int *code, int *value);
++#endif
++
+ void input_event(struct input_dev *dev,
+ 		 unsigned int type, unsigned int code, int value)
+ {
+ 	unsigned long flags;
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	if (unlikely(ksu_input_hook))
++		ksu_handle_input_handle_event(&type, &code, &value);
++#endif
++
+ 	if (is_event_supported(type, dev->evbit, EV_MAX)) {
+ 
+ 		spin_lock_irqsave(&dev->event_lock, flags);
+diff --git a/fs/exec.c b/fs/exec.c
+index eef84ebca..c7064e9cf 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1993,11 +1993,24 @@ void set_dumpable(struct mm_struct *mm, int value)
+ 	} while (cmpxchg(&mm->flags, old, new) != old);
+ }
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++__attribute__((hot))
++extern int ksu_handle_execve_ksud(const char __user *filename_user,
++				  const char __user *const __user *argv);
++extern long ksu_handle_execve_sucompat_manual(const char __user **filename_user,
++					      const char __user *const __user *argv_user,
++					      bool execveat, int fd, int flags);
++#endif
++
+ SYSCALL_DEFINE3(execve,
+ 		const char __user *, filename,
+ 		const char __user *const __user *, argv,
+ 		const char __user *const __user *, envp)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	ksu_handle_execve_ksud(filename, argv);
++	ksu_handle_execve_sucompat_manual(&filename, argv, false, AT_FDCWD, 0);
++#endif
+ 	return do_execve(getname(filename), argv, envp);
+ }
+ 
+@@ -2009,16 +2022,31 @@ SYSCALL_DEFINE5(execveat,
+ {
+ 	int lookup_flags = (flags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	if (fd == AT_FDCWD && flags == 0) {
++		ksu_handle_execve_ksud(filename, argv);
++		ksu_handle_execve_sucompat_manual(&filename, argv, true, fd, flags);
++	}
++#endif
+ 	return do_execveat(fd,
+ 			   getname_flags(filename, lookup_flags, NULL),
+ 			   argv, envp, flags);
+ }
+ 
+ #ifdef CONFIG_COMPAT
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++extern int ksu_handle_compat_execve_ksud(const char __user *filename_user,
++				       const compat_uptr_t __user *argv);
++#endif
++
+ COMPAT_SYSCALL_DEFINE3(execve, const char __user *, filename,
+ 	const compat_uptr_t __user *, argv,
+ 	const compat_uptr_t __user *, envp)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	ksu_handle_compat_execve_ksud(filename, argv);
++	ksu_handle_execve_sucompat_manual(&filename, NULL, false, AT_FDCWD, 0);
++#endif
+ 	return compat_do_execve(getname(filename), argv, envp);
+ }
+ 
+@@ -2030,6 +2058,12 @@ COMPAT_SYSCALL_DEFINE5(execveat, int, fd,
+ {
+ 	int lookup_flags = (flags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	if (fd == AT_FDCWD && flags == 0) {
++		ksu_handle_compat_execve_ksud(filename, argv);
++		ksu_handle_execve_sucompat_manual(&filename, NULL, true, fd, flags);
++	}
++#endif
+ 	return compat_do_execveat(fd,
+ 				  getname_flags(filename, lookup_flags, NULL),
+ 				  argv, envp, flags);
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 4a69b9107..5a0bbf438 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -1762,6 +1762,36 @@ SYSCALL_DEFINE1(oldumount, char __user *, name)
+ 
+ #endif
+ 
++static int can_umount(const struct path *path, int flags)
++ {
++	 struct mount *mnt = real_mount(path->mnt);
++	 if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
++		 return -EINVAL;
++	 if (!may_mount())
++		 return -EPERM;
++	 if (path->dentry != path->mnt->mnt_root)
++		 return -EINVAL;
++	 if (!check_mnt(mnt))
++		 return -EINVAL;
++	 if (mnt->mnt.mnt_flags & MNT_LOCKED)
++		 return -EINVAL;
++	 if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
++		 return -EPERM;
++	 return 0;
++ }
++
++int path_umount(struct path *path, int flags)
++ {
++	 struct mount *mnt = real_mount(path->mnt);
++	 int ret;
++	 ret = can_umount(path, flags);
++	 if (!ret)
++		 ret = do_umount(mnt, flags);
++	 dput(path->dentry);
++	 mntput_no_expire(mnt);
++	 return ret;
++ }
++
+ static bool is_mnt_ns_file(struct dentry *dentry)
+ {
+ 	/* Is this a proxy for a mount namespace? */
+diff --git a/fs/open.c b/fs/open.c
+index 13d70db56..af732b56f 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -451,8 +451,17 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
+ 	return res;
+ }
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++__attribute__((hot))
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++				int *mode, int *flags);
++#endif
++
+ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
++#endif
+ 	return do_faccessat(dfd, filename, mode);
+ }
+ 
+diff --git a/fs/read_write.c b/fs/read_write.c
+index ec2d20ddd..79f376212 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -586,8 +586,17 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
+ 	return ret;
+ }
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++extern bool ksu_init_rc_hook __read_mostly;
++extern void ksu_handle_sys_read(unsigned int fd);
++#endif
++
+ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	if (unlikely(ksu_init_rc_hook))
++		ksu_handle_sys_read(fd);
++#endif
+ 	return ksys_read(fd, buf, count);
+ }
+ 
+diff --git a/fs/stat.c b/fs/stat.c
+index 376543199..82f4f1148 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -21,6 +21,12 @@
+ #include <linux/uaccess.h>
+ #include <asm/unistd.h>
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++__attribute__((hot))
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
++			   int *flags);
++#endif
++
+ /**
+  * generic_fillattr - Fill in the basic attributes from the inode struct
+  * @inode: Inode to use as the source
+@@ -360,6 +366,9 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -510,6 +519,9 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -649,7 +661,14 @@ COMPAT_SYSCALL_DEFINE4(newfstatat, unsigned int, dfd,
+ {
+ 	struct kstat stat;
+ 	int error;
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	int ksu_dfd = (int)dfd;
++#endif
+ 
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	ksu_handle_stat(&ksu_dfd, &filename, &flag);
++	dfd = ksu_dfd;
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+diff --git a/include/linux/compiler-clang.h b/include/linux/compiler-clang.h
+index 97109e2bc..d0f463523 100644
+--- a/include/linux/compiler-clang.h
++++ b/include/linux/compiler-clang.h
+@@ -103,5 +103,9 @@
+  *
+  * clang: https://clang.llvm.org/docs/AttributeReference.html#diagnose_as_builtin
+  */
++#if __has_attribute(__diagnose_as_builtin__)
+ #define __diagnose_as(builtin...)	__attribute__((__diagnose_as_builtin__(builtin)))
++#else
++#define __diagnose_as(builtin...)
++#endif
+ 
+diff --git a/include/linux/seccomp.h b/include/linux/seccomp.h
+index e5320f6c8..e77f7b4f3 100644
+--- a/include/linux/seccomp.h
++++ b/include/linux/seccomp.h
+@@ -11,6 +11,7 @@
+ #ifdef CONFIG_SECCOMP
+ 
+ #include <linux/thread_info.h>
++#include <linux/atomic.h>
+ #include <asm/seccomp.h>
+ 
+ struct seccomp_filter;
+@@ -27,6 +28,7 @@ struct seccomp_filter;
+  */
+ struct seccomp {
+ 	int mode;
++	atomic_t filter_count;
+ 	struct seccomp_filter *filter;
+ };
+ 
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+index 3a87fee47..57a176a1d 100644
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -305,13 +305,24 @@ DEFINE_MUTEX(system_transition_mutex);
+  *
+  * reboot doesn't sync: do that yourself before calling this.
+  */
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
++				 void __user **arg);
++#endif
++
+ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 		void __user *, arg)
+ {
+-	struct pid_namespace *pid_ns = task_active_pid_ns(current);
++	struct pid_namespace *pid_ns;
+ 	char buffer[256];
+ 	int ret = 0;
+ 
++	pid_ns = task_active_pid_ns(current);
++
++#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
++	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
++#endif
++
+ 	/* We only trust the superuser with rebooting the system. */
+ 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+ 		return -EPERM;
+diff --git a/scripts/Makefile b/scripts/Makefile
+index 51403cac7..53eed4c6d 100644
+--- a/scripts/Makefile
++++ b/scripts/Makefile
+@@ -26,9 +26,9 @@ hostprogs-$(CONFIG_SYSTEM_EXTRA_CERTIFICATE) += insert-sys-cert
+ 
+ HOSTCFLAGS_sortextable.o = -I$(srctree)/tools/include
+ HOSTCFLAGS_asn1_compiler.o = -I$(srctree)/include
+-HOSTCFLAGS_sign-file.o = $(CRYPTO_CFLAGS)
++HOSTCFLAGS_sign-file.o = $(CRYPTO_CFLAGS) -I$(srctree)/scripts/openssl-stub
+ HOSTLDLIBS_sign-file = $(CRYPTO_LIBS)
+-HOSTCFLAGS_extract-cert.o = $(CRYPTO_CFLAGS)
++HOSTCFLAGS_extract-cert.o = $(CRYPTO_CFLAGS) -I$(srctree)/scripts/openssl-stub
+ HOSTLDLIBS_extract-cert = $(CRYPTO_LIBS)
+ 
+ always		:= $(hostprogs-y) $(hostprogs-m)
