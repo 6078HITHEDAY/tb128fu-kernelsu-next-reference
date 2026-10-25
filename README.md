@@ -9,8 +9,10 @@
 > KernelSU fork — it is a set of patches against pinned upstream commits, plus build, packaging and
 > validation notes. Everything here was built and verified on the device listed below.
 
-本仓库只放**补丁与文档**，不含内核全树、boot 镜像、管理器 APK 或原厂固件。补丁已验证能在下列
-基线提交上逐级干净应用，并**精确复现**当时的源码树（见 [`patches/README.md`](patches/README.md)）。
+本仓库的 git 历史只放**补丁与文档**，不含内核全树、管理器 APK 或原厂固件；最终 boot 镜像与
+校验值作为 [Release r10](https://github.com/6078HITHEDAY/tb128fu-kernelsu-next-reference/releases/tag/r10)
+附件发布。补丁已验证能在下列基线提交上逐级干净应用，并**精确复现**当时的源码树
+（见 [`patches/README.md`](patches/README.md)）。
 
 ## 项目状态
 
